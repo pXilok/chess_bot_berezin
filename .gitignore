@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.exe
+*.zip
+*.rar
+save.dat
+scores.dat
+.venv/
+venv/
+.vscode/
+.idea/
+.DS_Store
