@@ -9,6 +9,8 @@ import threading
 import time
 import math
 import queue
+import urllib.request
+import urllib.error
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -111,8 +113,89 @@ font_flag = pygame.font.SysFont("Segoe UI", 20, bold=True)
 BG_GRADIENT = make_gradient(WIDTH, HEIGHT, BG_TOP, BG_BOT)
 MENU_GRADIENT = make_gradient(WIDTH, HEIGHT, (32,30,40), (16,14,22))
 
+# ============ ЗВУКИ ============
+import array
+
+SOUNDS = {}
+MIXER_OK = False
+
+
+def generate_sound(freq_start, freq_end, duration, volume=0.35, sample_rate=22050, harmonic=0.3):
+    try:
+        n = int(sample_rate * duration)
+        samples = array.array('h')
+        for i in range(n):
+            t = i / sample_rate
+            progress = i / max(1, n - 1)
+            freq = freq_start + (freq_end - freq_start) * progress
+            if progress < 0.03:
+                env = progress / 0.03
+            elif progress < 0.15:
+                env = 1.0 - 0.3 * ((progress - 0.03) / 0.12)
+            elif progress < 0.8:
+                env = 0.7
+            else:
+                env = 0.7 * (1 - (progress - 0.8) / 0.2)
+            val = math.sin(2 * math.pi * freq * t) * (1 - harmonic)
+            val += math.sin(2 * math.pi * freq * 2 * t) * harmonic
+            s = int(32767 * volume * max(0, env) * val)
+            samples.append(max(-32768, min(32767, s)))
+        return samples
+    except:
+        return None
+
+
+def init_sounds():
+    global MIXER_OK
+    try:
+        pygame.mixer.pre_init(22050, -16, 1, 512)
+        pygame.mixer.init()
+        MIXER_OK = True
+    except Exception as e:
+        print(f"[SOUND] mixer failed: {e}")
+        MIXER_OK = False
+        return
+    specs = {
+        "move":    (523, 659, 0.08, 0.25),
+        "capture": (440, 220, 0.15, 0.35),
+        "check":   (880, 1100, 0.20, 0.30),
+        "correct": (784, 1046, 0.30, 0.35),
+        "wrong":   (300, 200, 0.25, 0.35),
+        "win":     (523, 1046, 0.50, 0.35),
+        "lose":    (400, 200, 0.50, 0.30),
+    }
+    for name, (f1, f2, dur, vol) in specs.items():
+        samples = generate_sound(f1, f2, dur, vol)
+        if samples:
+            try:
+                SOUNDS[name] = pygame.mixer.Sound(buffer=samples)
+            except: pass
+    print(f"[SOUND] loaded {len(SOUNDS)} sounds")
+
+
+def play_sound(name):
+    if not MIXER_OK: return
+    snd = SOUNDS.get(name)
+    if snd:
+        try: snd.play()
+        except: pass
+
+
+def play_move_sound(captured):
+    if board.is_checkmate():
+        winner_black = board.turn == chess.BLACK
+        you_won = (winner_black and player_color == chess.WHITE) or \
+                  (not winner_black and player_color == chess.BLACK)
+        play_sound("win" if you_won else "lose")
+    elif board.is_check():
+        play_sound("check")
+    elif captured:
+        play_sound("capture")
+    else:
+        play_sound("move")
+
+
 def play(s): pass
-def init_sounds(): pass
 
 # ============ ФЛАГИ (рисуем как текст в цветном кружке) ============
 FLAGS = {
@@ -257,6 +340,7 @@ def get_current_opponent():
 
 PIECE_IMAGES = {}
 def load_pieces():
+    init_sounds()
     names = {'K':'wK','Q':'wQ','R':'wR','B':'wB','N':'wN','P':'wP',
              'k':'bK','q':'bQ','r':'bR','b':'bB','n':'bN','p':'bP'}
     for sym, fname in names.items():
@@ -480,6 +564,78 @@ def load_puzzles():
                 good += 1
             except: bad += 1; continue
     print(f"[PUZZLES] loaded={good} skipped={bad}")
+
+
+def fetch_lichess_puzzle():
+    """Получает случайную задачу с Lichess API (онлайн)."""
+    try:
+        import io
+        import chess.pgn
+        url = "https://lichess.org/api/puzzle/next"
+        req = urllib.request.Request(url, headers={
+            'User-Agent': 'ChessTrainer/1.0',
+            'Accept': 'application/json'
+        })
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+
+        pgn_text = data["game"]["pgn"]
+        game = chess.pgn.read_game(io.StringIO(pgn_text))
+        b = game.board()
+        for move in game.mainline_moves():
+            b.push(move)
+
+        puzzle = data["puzzle"]
+        return {
+            "fen": b.fen(),
+            "moves": puzzle["solution"],
+            "rating": puzzle["rating"],
+            "themes": puzzle.get("themes", []),
+            "id": puzzle["id"],
+        }
+    except Exception as e:
+        print(f"[LICHESS] error: {e}")
+        return None
+
+
+def load_lichess_puzzle():
+    """Загружает задачу с Lichess. Возвращает True если успешно."""
+    global current_moves, move_index, board, selected_square, legal_targets
+    global puzzle_status, solved, last_move, animations, current_rating
+    global current_eval_cp, eval_mate, current_puzzle_id, player_color, arrows
+    global history_start_fen
+
+    print("[LICHESS] fetching...")
+    p = fetch_lichess_puzzle()
+    if p is None:
+        return False
+
+    try:
+        new_board = chess.Board(p["fen"])
+        moves = p["moves"]
+
+        history_start_fen = p["fen"]
+        board = new_board
+        animations.clear();
+        arrows.clear()
+        current_moves = moves
+        move_index = 0
+        selected_square = None
+        legal_targets = []
+        solved = False
+        player_color = board.turn
+        current_rating = p["rating"]
+        current_puzzle_id = p["id"]
+
+        themes = ", ".join(p["themes"][:3]) if p["themes"] else ""
+        puzzle_status = f"Lichess #{p['id'][:6]}  rating {p['rating']}  {themes}"
+        current_eval_cp = 0;
+        eval_mate = None
+        return True
+    except Exception as e:
+        print(f"[LICHESS] parse: {e}")
+        return False
+
 
 def load_next_puzzle():
     global current_moves, move_index, board, selected_square, legal_targets
@@ -929,20 +1085,21 @@ def draw_popup():
         screen.blit(pt, (bx + pad, by + pad // 2))
 
 # ============ МЕНЮ ============
-MENU_BUTTONS = []
+    MENU_BUTTONS = [ ]
 def draw_menu():
     global MENU_BUTTONS
     screen.blit(MENU_GRADIENT, (0, 0))
     title = font_huge.render("CHESS TRAINER", True, HINT_COLOR)
-    screen.blit(title, (WIDTH // 2 - title.get_width() // 2, 80))
+    screen.blit(title, (WIDTH // 2 - title.get_width() // 2, 40))
     subtitle = font_mid.render("Play against the greatest minds in chess history", True, (150, 150, 170))
-    screen.blit(subtitle, (WIDTH // 2 - subtitle.get_width() // 2, 155))
+    screen.blit(subtitle, (WIDTH // 2 - subtitle.get_width() // 2, 115))
     bw, bh = 420, 62
     bx = WIDTH // 2 - bw // 2
-    by = 240
+    by = 320
     gap = 18
     MENU_BUTTONS = [
-        ("PUZZLE TRAINING", bx, by, bw, bh, STATE_PUZZLE),
+        ("ONLINE PUZZLES (LICHESS)", bx, by - 80, bw, bh, "LICHESS"),
+        ("PUZZLE TRAINING (300)", bx, by, bw, bh, STATE_PUZZLE),
         ("PLAY vs STOCKFISH", bx, by + (bh + gap) * 1, bw, bh, STATE_SETUP_STOCKFISH),
         ("PLAY vs LEGENDS", bx, by + (bh + gap) * 2, bw, bh, STATE_SETUP_LEGENDS),
         ("STATISTICS", bx, by + (bh + gap) * 3, bw, bh, STATE_STATS),
@@ -1452,6 +1609,7 @@ def try_move(from_sq, to_sq):
             last_move = chosen
             selected_square = None; legal_targets = []
             start_anim(piece_sym, from_sq, to_sq, cap_sym)
+            play_move_sound(cap_sym is not None)
             flash_color = (100, 240, 100); flash_timer = 0.5
             move_index += 1
             if move_index >= len(current_moves):
@@ -1498,6 +1656,7 @@ def try_move(from_sq, to_sq):
         last_move = chosen
         selected_square = None; legal_targets = []
         start_anim(piece_sym, from_sq, to_sq, cap_sym)
+        play_move_sound(cap_sym is not None)
         if game_started:
             record_move_for_analysis(san, color, eval_before)
         inc = 2
@@ -1615,7 +1774,7 @@ def main():
                     if player_color == chess.BLACK: stats['games_lost'] = stats.get('games_lost', 0) + 1
                     else: stats['games_won'] = stats.get('games_won', 0) + 1
                     save_stats()
-
+        check_and_save_finished_game()
         if state == STATE_VS_AI and ai_thinking:
             if not ai_result_queue.empty():
                 try: gen, mv = ai_result_queue.get_nowait()
@@ -1632,6 +1791,7 @@ def main():
                     board.push(mv)
                     last_move = mv
                     start_anim(ps, mv.from_square, mv.to_square, cs)
+                    play_move_sound(cs is not None)
                     inc = 2
                     if color == chess.WHITE: white_time += inc
                     else: black_time += inc
@@ -1708,6 +1868,15 @@ def main():
                         if pygame.Rect(x, y, w, h).collidepoint(mx, my):
                             if action == "QUIT":
                                 running = False
+                            elif action == "LICHESS":
+                                mode = MODE_PUZZLE
+                                puzzle_score = 0
+                                puzzle_total_answered = 0
+                                show_popup("Loading from Lichess...", 2.0)
+                                if load_lichess_puzzle():
+                                    state = STATE_PUZZLE
+                                else:
+                                    show_popup("No internet or Lichess error", 2.5)
                             elif action == STATE_PUZZLE:
                                 mode = MODE_PUZZLE
                                 puzzle_score = 0; puzzle_total_answered = 0
@@ -1820,6 +1989,53 @@ def main():
 
     if engine: engine.quit()
     pygame.quit()
+# ============ ОТПРАВКА НА СЕРВЕР ============
+_last_saved_game_token = None
+
+def save_game_to_server(opponent_name, result, moves_str):
+    """Отправляет партию на сервер в БД."""
+    try:
+        import json
+        data = json.dumps({
+            "player_name": "You",
+            "opponent": opponent_name,
+        }).encode('utf-8')
+        req = urllib.request.Request(
+            "http://127.0.0.1:8000/api/v1/games",
+            data=data,
+            headers={'Content-Type': 'application/json'},
+            method='POST'
+        )
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            print(f"[SERVER] Game saved! Status {resp.status}")
+            return True
+    except Exception as e:
+        print(f"[SERVER] Save failed: {e}")
+        return Fals
+def check_and_save_finished_game():
+    global _last_saved_game_token
+    if state != STATE_VS_AI:
+        return
+    if not board.is_game_over():
+        return
+    token = len(board.move_stack)
+    if token == 0:
+        return
+    if _last_saved_game_token == token:
+        return
+    _last_saved_game_token = token
+
+    try:
+        opponent_name = get_current_opponent()["name"]
+        moves_str = " ".join([m.uci() for m in board.move_stack])
+        success = save_game_to_server(opponent_name, "finished", moves_str)
+        if success:
+            show_popup("Game saved to server!", 2.5)
+        else:
+            show_popup("Server offline", 2.5)
+    except Exception as e:
+        print(f"[SERVER] check error: {e}")
+
 
 if __name__ == "__main__":
     main()

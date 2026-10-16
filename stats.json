@@ -1,9 +1,9 @@
 {
-  "puzzles_solved": 20,
-  "best_streak": 4,
-  "current_streak": 4,
+  "puzzles_solved": 25,
+  "best_streak": 6,
+  "current_streak": 1,
   "games_won": 0,
-  "games_lost": 2644,
+  "games_lost": 2647,
   "solved_puzzle_ids": [
     208,
     107,
@@ -23,6 +23,11 @@
     287,
     41,
     177,
-    23
+    23,
+    226,
+    242,
+    0,
+    "Ym15L",
+    199
   ]
 }
